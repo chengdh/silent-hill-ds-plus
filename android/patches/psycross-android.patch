@@ -1,0 +1,210 @@
+diff --git a/src/PsyX_main.cpp b/src/PsyX_main.cpp
+index 031c91d..65849d5 100644
+--- a/src/PsyX_main.cpp
++++ b/src/PsyX_main.cpp
+@@ -667,12 +667,18 @@ void PrintMessageToOutput(SpewType_t spewtype, char const* pMsgFormat, va_list a
+ 			console.log(UTF8ToString($0));
+ 		}, pTempBuffer);
+ 	}
++#elif defined(__ANDROID__)
++	// stdout never reaches logcat, and these are the only channel the log has
++	// on Android.
++	PsyX_AndroidLog(spewtype == SPEW_ERROR   ? ANDROID_LOG_ERROR :
++	                spewtype == SPEW_WARNING ? ANDROID_LOG_WARN : ANDROID_LOG_INFO,
++	                "%s", pTempBuffer);
+ #else
+-	printf(pTempBuffer);
++	fputs(pTempBuffer, stdout);
+ #endif
+ 
+ 	if(g_logStream)
+-		fprintf(g_logStream, pTempBuffer);
++		fputs(pTempBuffer, g_logStream);
+ }
+ 
+ void PsyX_Log(const char* fmt, ...)
+diff --git a/src/gpu/PsyX_GPU.cpp b/src/gpu/PsyX_GPU.cpp
+index 0b71c97..53793da 100644
+--- a/src/gpu/PsyX_GPU.cpp
++++ b/src/gpu/PsyX_GPU.cpp
+@@ -388,7 +388,16 @@ static unsigned s_wmDevPrims, s_wmPrecPrims;
+ extern "C" { double g_wmTParse = 0, g_wmTDraw = 0, g_wmTChunks = 0, g_wmTXform = 0, g_wmTMesh = 0; unsigned g_wmSplits = 0, g_wmVerts = 0, g_wmOtDraws = 0; }
+ static Uint64 s_wmFrameStart = 0;
+ /* Probe-frame cycle counts per GT4 parse step (world prims are GT4). */
+-#include <x86intrin.h>
++#if defined(__x86_64__) || defined(__i386__)
++#   include <x86intrin.h>
++#   define WM_TSC() __rdtsc()
++#elif defined(__aarch64__) || defined(__arm__)
++/* x86intrin.h is x86-only; the ARM generic counter is the equivalent tick
++ * source (same monotonic-per-core semantics for a profiling probe). */
++#   define WM_TSC() __builtin_readcyclecounter()
++#else
++#   define WM_TSC() 0ULL
++#endif
+ static unsigned long long s_wmCyc[9];
+ static unsigned s_wmGt4;
+ /* Probe-frame parse cost by prim class: [code>>4], 16 = 0xB5 far quads,
+@@ -398,8 +407,8 @@ static unsigned long long s_wmClsCyc[18];
+ static unsigned s_wmClsN[18];
+ static unsigned long long s_wmTscStart;
+ extern "C" { double g_wmTGpu = 0; unsigned g_wmFarQuads = 0, g_wmFarSplits = 0, g_wmFarFlushes = 0, g_wmFarMeshKeys = 0, g_wmFarMeshDraws = 0, g_wmFarMeshQueued = 0; }
+-#define WM_CLS(i, stmt) do { if (g_PsxWholeMapProbe == 1) { unsigned long long _c0 = __rdtsc(); stmt; s_wmClsCyc[i] += __rdtsc() - _c0; s_wmClsN[i]++; } else { stmt; } } while (0)
+-#define WM_CYC(i, stmt) do { if (g_PsxWholeMapProbe == 1) { unsigned long long _c0 = __rdtsc(); stmt; s_wmCyc[i] += __rdtsc() - _c0; } else { stmt; } } while (0)
++#define WM_CLS(i, stmt) do { if (g_PsxWholeMapProbe == 1) { unsigned long long _c0 = WM_TSC(); stmt; s_wmClsCyc[i] += WM_TSC() - _c0; s_wmClsN[i]++; } else { stmt; } } while (0)
++#define WM_CYC(i, stmt) do { if (g_PsxWholeMapProbe == 1) { unsigned long long _c0 = WM_TSC(); stmt; s_wmCyc[i] += WM_TSC() - _c0; } else { stmt; } } while (0)
+ static unsigned s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmAffineVerts, s_wmPreciseVerts;
+ static float s_wmWMin, s_wmWMax;
+ static unsigned char s_lastLookupFar;
+@@ -456,7 +465,7 @@ extern "C" void PGXP_CoverageTick(void)
+ 			g_wmTChunks, g_wmTParse, g_wmTDraw, g_wmTXform, g_wmTMesh, g_wmOtDraws, g_wmSplits, g_wmVerts);
+ 		{
+ 			const double frameMs = (double)(SDL_GetPerformanceCounter() - s_wmFrameStart) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+-			const double cycPerMs = (frameMs > 0.0) ? (double)(__rdtsc() - s_wmTscStart) / frameMs : 1.0;
++			const double cycPerMs = (frameMs > 0.0) ? (double)(WM_TSC() - s_wmTscStart) / frameMs : 1.0;
+ 			char buf[1024];
+ 			int len = 0;
+ 			for (int c = 0; c < 18; c++)
+@@ -486,7 +495,7 @@ extern "C" void PGXP_CoverageTick(void)
+ 		s_wmDevPrims = s_wmPrecPrims = 0;
+ 		memset(s_wmCyc, 0, sizeof(s_wmCyc)); s_wmGt4 = 0;
+ 		memset(s_wmClsCyc, 0, sizeof(s_wmClsCyc)); memset(s_wmClsN, 0, sizeof(s_wmClsN));
+-		g_wmTGpu = 0; g_wmFarQuads = g_wmFarSplits = g_wmFarFlushes = g_wmFarMeshKeys = g_wmFarMeshDraws = g_wmFarMeshQueued = 0; s_wmTscStart = __rdtsc();
++		g_wmTGpu = 0; g_wmFarQuads = g_wmFarSplits = g_wmFarFlushes = g_wmFarMeshKeys = g_wmFarMeshDraws = g_wmFarMeshQueued = 0; s_wmTscStart = WM_TSC();
+ 		g_wmTParse = g_wmTDraw = g_wmTChunks = g_wmTXform = g_wmTMesh = 0; g_wmSplits = g_wmVerts = g_wmOtDraws = 0;
+ 		s_wmFrameStart = SDL_GetPerformanceCounter();
+ 		g_PsxWholeMapProbe = 1;
+diff --git a/src/platform.h b/src/platform.h
+index 3f16bbe..8b03226 100644
+--- a/src/platform.h
++++ b/src/platform.h
+@@ -31,11 +31,33 @@
+ 
+ #if defined(__ANDROID__)
+ #   include <android/log.h>
+-#   define LOG_TAG_EMU "[PsyX] "
+-#   define eprintf(fmt, ...)       __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG_EMU, fmt, ##__VA_ARGS__)
+-#   define eprintinfof(fmt, ...)   __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG_EMU " [INFO]", fmt, ##__VA_ARGS__)
+-#   define eprintwarnf(fmt, ...)   __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG_EMU " [WARN]", fmt, ##__VA_ARGS__)
+-#   define eprinterr(fmt, ...)     eprintf("[%s] - " fmt, FUNCNAME, ##__VA_ARGS__);
++#   include <stdarg.h>
++#   include <stdio.h>
++#   define LOG_TAG_EMU "PsyX"
++
++// Format into a buffer first, then hand logcat a literal "%s". Passing a
++// runtime format string straight to __android_log_print() trips the NDK's
++// -Werror=format-security, and callers do log variables.
++static inline void PsyX_AndroidLog(int prio, const char* fmt, ...)
++{
++    char buffer[1024];
++    va_list args;
++
++    va_start(args, fmt);
++    vsnprintf(buffer, sizeof(buffer), fmt, args);
++    va_end(args);
++
++    __android_log_print(prio, LOG_TAG_EMU, "%s", buffer);
++}
++
++// The rest of the code base calls eprintinfo/eprintwarn; this branch used to
++// define only the *f spellings, so nothing under __ANDROID__ ever compiled.
++#   define eprintf(fmt, ...)       PsyX_AndroidLog(ANDROID_LOG_DEBUG, fmt, ##__VA_ARGS__)
++#   define eprintinfo(fmt, ...)    PsyX_AndroidLog(ANDROID_LOG_INFO,  fmt, ##__VA_ARGS__)
++#   define eprintinfof(fmt, ...)   eprintinfo(__VA_ARGS__)
++#   define eprintwarn(fmt, ...)    PsyX_AndroidLog(ANDROID_LOG_WARN,  fmt, ##__VA_ARGS__)
++#   define eprintwarnf(fmt, ...)   eprintwarn(__VA_ARGS__)
++#   define eprinterr(fmt, ...)     PsyX_AndroidLog(ANDROID_LOG_ERROR, "[%s] - " fmt, FUNCNAME, ##__VA_ARGS__);
+ #else
+ #   define eprintf(fmt, ...)       PsyX_Log("[Psy-X] " fmt, ##__VA_ARGS__)
+ #   define eprintinfo(fmt, ...)    PsyX_Log_Info("[Psy-X] " fmt, ##__VA_ARGS__)
+diff --git a/src/render/PsyX_render.cpp b/src/render/PsyX_render.cpp
+index d67eade..3b536eb 100644
+--- a/src/render/PsyX_render.cpp
++++ b/src/render/PsyX_render.cpp
+@@ -427,10 +427,14 @@ static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
+ 
+ 		if (g_cfg_textureFilter >= 2 && g_grCaps.texLevelParam)
+ 		{
++#if !defined(RENDERER_OGLES)
++			// glGetTexLevelParameteriv has no ES equivalent (texLevelParam is
++			// always false on ES), so this query simply does not exist there.
+ 			GLint mipW = 0;
+ 			glGetTexLevelParameteriv(GL_TEXTURE_2D, 1, GL_TEXTURE_WIDTH, &mipW);
+ 			if (mipW > 0)
+ 				minFilter = GL_LINEAR_MIPMAP_LINEAR;
++#endif
+ 		}
+ 	}
+ 
+@@ -1378,14 +1382,15 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
+ #if defined(RENDERER_OGLES)
+ 
+ #if defined(__ANDROID__)
+-	//Override to full screen.
++	// Override to full screen. The window is created fullscreen and the GL
++	// drawable size is read back later, but g_windowWidth/Height must be sane
++	// before SDL_CreateWindow() (it bails out on non-positive sizes). These are
++	// the only size globals that exist -- screenWidth/windowWidth never did.
+ 	SDL_DisplayMode displayMode;
+-	if (SDL_GetCurrentDisplayMode(0, &displayMode) == 0)
++	if (SDL_GetCurrentDisplayMode(0, &displayMode) == 0 && displayMode.w > 0 && displayMode.h > 0)
+ 	{
+-		screenWidth = displayMode.w;
+-		windowWidth = displayMode.w;
+-		screenHeight = displayMode.h;
+-		windowHeight = displayMode.h;
++		g_windowWidth  = displayMode.w;
++		g_windowHeight = displayMode.h;
+ 	}
+ #endif
+ 
+@@ -3313,7 +3318,11 @@ int GR_InitialisePSX()
+ 	 * the sample count the driver actually granted (may differ from requested). */
+ 	if (g_cfg_msaaSamples > 0)
+ 	{
++#if !defined(RENDERER_OGLES)
++		/* GL_MULTISAMPLE is a desktop token; ES multisamples a multisample
++		 * framebuffer implicitly and has no such enable. */
+ 		glEnable(GL_MULTISAMPLE);
++#endif
+ 		int actualSamples = 0;
+ 		SDL_GL_GetAttribute(SDL_GL_MULTISAMPLESAMPLES, &actualSamples);
+ 		eprintf("*MSAA: requested %dx, got %dx\n", g_cfg_msaaSamples, actualSamples);
+@@ -5634,9 +5643,11 @@ static void GR_EnsureShadowTarget(void)
+ 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+ 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+ 	/* CLAMP_TO_BORDER and the border colour are desktop GL / ES 3.2; ES 3.0 has
+-	 * neither. CLAMP_TO_EDGE is a safe stand-in here because the fragment shader
+-	 * already rejects receivers outside 0..1 in the light frustum before it ever
+-	 * samples, so the border texels are never observed. */
++	 * neither, and neither do the ES headers, so the desktop branch cannot even
++	 * name them in an ES build. CLAMP_TO_EDGE is a safe stand-in here because the
++	 * fragment shader already rejects receivers outside 0..1 in the light
++	 * frustum before it ever samples, so the border texels are never observed. */
++#if !defined(RENDERER_OGLES)
+ 	if (!g_grIsGLES)
+ 	{
+ 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+@@ -5645,6 +5656,7 @@ static void GR_EnsureShadowTarget(void)
+ 		glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+ 	}
+ 	else
++#endif
+ 	{
+ 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+ 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+@@ -5655,10 +5667,13 @@ static void GR_EnsureShadowTarget(void)
+ 	glBindFramebuffer(GL_FRAMEBUFFER, g_shadowFBO);
+ 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, g_shadowDepthTex, 0);
+ 	/* Depth-only target. ES 3.0 dropped the singular glDrawBuffer in favour of
+-	 * the array form, which takes the same GL_NONE. */
++	 * the array form, which takes the same GL_NONE -- and the ES headers only
++	 * declare the array form. */
++#if !defined(RENDERER_OGLES)
+ 	if (g_grCaps.drawBuffer)
+ 		glDrawBuffer(GL_NONE);
+ 	else
++#endif
+ 	{
+ 		const GLenum none = GL_NONE;
+ 		glDrawBuffers(1, &none);

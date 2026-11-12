@@ -51,7 +51,9 @@ ROOT_PATH_ARGS='-DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH
 
 # The decomp is a WIP and relies on implicit declarations / int-to-pointer
 # conversions. NDK Clang turns several of those into errors by default.
-WARN_ARGS='-Wno-unknown-warning-option -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=return-mismatch -Wno-error=declaration-missing-parameter-type'
+# format-security is in here as well: the engine logs values it builds at
+# runtime, and NDK's -Werror=format-security rejects passing those as formats.
+WARN_ARGS='-Wno-unknown-warning-option -Wno-error=format-security -Wno-format-security -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=return-mismatch -Wno-error=declaration-missing-parameter-type'
 
 check_host() {
     need git
@@ -74,10 +76,25 @@ clone_pinned() {
     _url=$1; _ref=$2; _dir=$3
     if [ ! -d "$_dir/.git" ]; then
         mkdir -p "$(dirname "$_dir")"
-        log "cloning $_url"
-        git clone --quiet "$_url" "$_dir"
+        log "cloning $_url at $_ref"
+        # Only one pinned tree is ever built, so a single-commit clone is
+        # enough. Full-history clones of these repositories are hundreds of
+        # megabytes and regularly die halfway over a slow or proxied link
+        # ("early EOF" / "unexpected disconnect"), which then costs a restart.
+        if ! GIT_TERMINAL_PROMPT=0 git clone --quiet --depth 1 --no-tags \
+                --branch "$_ref" "$_url" "$_dir"; then
+            # _ref is a raw commit: it cannot be cloned by name, so fetch just
+            # that commit instead.
+            rm -rf "$_dir"
+            git init --quiet "$_dir"
+            git -C "$_dir" remote add origin "$_url"
+            GIT_TERMINAL_PROMPT=0 git -C "$_dir" fetch --quiet --depth 1 \
+                origin "$_ref" || die "cannot fetch $_ref from $_url"
+            git -C "$_dir" checkout --quiet FETCH_HEAD
+        fi
     fi
-    git -C "$_dir" checkout --quiet "$_ref"
+    git -C "$_dir" checkout --quiet "$_ref" || \
+        die "$_dir does not contain $_ref"
 }
 
 fetch_sources() {
@@ -87,10 +104,25 @@ fetch_sources() {
     clone_pinned "$OPENAL_REPO"   "$OPENAL_REF"     "$THIRD/openal-soft"
     clone_pinned "$JPEG_REPO"     "$JPEG_REF"       "$THIRD/libjpeg-turbo"
 
-    git -C "$UPSTREAM" submodule update --init pc_port/PsyCross
+    if ! git -C "$UPSTREAM" submodule update --init --depth 1 pc_port/PsyCross; then
+        git -C "$UPSTREAM" submodule update --init pc_port/PsyCross
+    fi
     _psycross=$(git -C "$UPSTREAM/pc_port/PsyCross" rev-parse HEAD)
     [ "$_psycross" = "$PSYCROSS_COMMIT" ] || \
         die "PsyCross submodule is at $_psycross, expected $PSYCROSS_COMMIT"
+
+    # PsyCross advertises an Android/GLES3 path, but its __ANDROID__ branch is
+    # incomplete: it defines eprintinfof/eprintwarnf while the whole engine
+    # calls eprintinfo/eprintwarn, and it feeds runtime strings to
+    # __android_log_print(). Nothing under __ANDROID__ had ever been compiled,
+    # so this patch is a fix, not an adaptation. It is applied inside the
+    # submodule, which is why it cannot live in the upstream tree patch.
+    _psycross_stamp="$UPSTREAM/pc_port/PsyCross/.sh-android-patched"
+    if [ ! -f "$_psycross_stamp" ]; then
+        git -C "$UPSTREAM/pc_port/PsyCross" apply "$HERE/patches/psycross-android.patch" || \
+            die "PsyCross patch failed to apply (is PSYCROSS_COMMIT still $PSYCROSS_COMMIT?)"
+        touch "$_psycross_stamp"
+    fi
 
     # The RG DS Plus patch is deliberately NOT applied: it is a two-process,
     # two-window Wayland port for the RG DS hardware. Android uses the upstream
@@ -172,7 +204,7 @@ build_game() {
         -DCMAKE_MODULE_PATH="$HERE/cmake" \
         -DSH_ANDROID_DEPS_PREFIX="$DEPS" \
         -DCMAKE_C_FLAGS="$WARN_ARGS" \
-        -DCMAKE_CXX_FLAGS="-Wno-unknown-warning-option" \
+        -DCMAKE_CXX_FLAGS="$WARN_ARGS" \
         -DJPEG_LIBRARY="$DEPS/lib/libjpeg.a" \
         -DJPEG_INCLUDE_DIR="$DEPS/include" \
         -DSH_STATIC_MAPS=ON -DSH_BUILD_MAP_DLLS=OFF \

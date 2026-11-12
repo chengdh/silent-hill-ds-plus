@@ -1,5 +1,5 @@
 diff --git a/pc_port/CMakeLists.txt b/pc_port/CMakeLists.txt
-index fe2eb14..9f7ce8c 100644
+index fe2eb1489..9f7ce8c2f 100644
 --- a/pc_port/CMakeLists.txt
 +++ b/pc_port/CMakeLists.txt
 @@ -253,7 +253,11 @@ else()
@@ -73,8 +73,25 @@ index fe2eb14..9f7ce8c 100644
  
  # =============================================================================
  # Tests (-DBUILD_TESTING=ON, then ctest)
+diff --git a/pc_port/src/fmv/fmv_player.cpp b/pc_port/src/fmv/fmv_player.cpp
+index 939a3998f..1cb1fdd8a 100644
+--- a/pc_port/src/fmv/fmv_player.cpp
++++ b/pc_port/src/fmv/fmv_player.cpp
+@@ -21,7 +21,12 @@
+ #include <PsyX/PsyX_render.h>
+ #include <PsyX/PsyX_globals.h> /* g_windowWidth/Height = the scene-target size */
+ #include <PsyX/util/timer.h>
++/* On GLES builds PsyX_render.h has already pulled in the ES headers and glad.h
++ * refuses to be included on top of them. The GL entry points come from the ES
++ * headers there, so this include is desktop-only. */
++#ifndef RENDERER_OGLES
+ #include <PsyX/common/glad.h>
++#endif
+ #include <PsyX/PsyX_backend.h>
+ 
+ #include <psx/libgpu.h>
 diff --git a/pc_port/src/main_pc.c b/pc_port/src/main_pc.c
-index 5bd38cd..a2ac4e9 100644
+index 5bd38cdd5..a2ac4e961 100644
 --- a/pc_port/src/main_pc.c
 +++ b/pc_port/src/main_pc.c
 @@ -13,9 +13,17 @@
@@ -108,3 +125,121 @@ index 5bd38cd..a2ac4e9 100644
      /* Log file is NOT opened until after config load. SH_DBG calls before
       * that point are silently no-ops (the macro short-circuits on a NULL
       * handle). Avoids creating SilentHill.log when enable_debug_log=0. */
+diff --git a/pc_port/src/pc_console_cmd.c b/pc_port/src/pc_console_cmd.c
+index ccbe00281..6e6c4be11 100644
+--- a/pc_port/src/pc_console_cmd.c
++++ b/pc_port/src/pc_console_cmd.c
+@@ -1938,6 +1938,10 @@ void Pc_ConsoleExec(const char* line)
+         else if (arg[0] == '0') g_PsxPgxpDepthStats = 0;
+         else g_PsxPgxpDepthStats = !g_PsxPgxpDepthStats;
+         cprintf("PGXP depth-channel stats dump: %s", g_PsxPgxpDepthStats ? "ON" : "OFF");
++#if defined(SH_RETROACHIEVEMENTS)
++    /* RetroAchievements console commands. Guarded because Pc_Ra_Why and
++     * Pc_Ra_PreviewFirst only exist when the RA backend is compiled in; the
++     * unguarded calls broke the link in every build with RA disabled. */
+     } else if (strcmp(cmd, "RAWHY") == 0) {
+         /* Dump an achievement's conditions + the values we return, to SilentHill.log. */
+         extern int Pc_Ra_Why(const char*);
+@@ -1960,6 +1964,7 @@ void Pc_ConsoleExec(const char* line)
+         {
+             cprintf("Achievement toast preview (real achievement + badge)");
+         }
++#endif
+     } else if (strcmp(cmd, "PGXPWORLDDEPTH") == 0) {
+         /* Depth-channel kill-switch: OFF suppresses FLAT world promotion
+          * (GL_ALWAYS painter + viewZ flat depth), dropping depth behavior
+diff --git a/pc_port/src/stubs/func_stubs.c b/pc_port/src/stubs/func_stubs.c
+index 53d8ef087..b7e99d147 100644
+--- a/pc_port/src/stubs/func_stubs.c
++++ b/pc_port/src/stubs/func_stubs.c
+@@ -54,9 +54,15 @@ TIM_IMAGE* ReadTIM(TIM_IMAGE* timimg)
+     return timimg;
+ }
+ 
+-/* SDL_main - SDL2main.a calls this; redirect to our actual main */
++/* SDL_main - SDL2main.a calls this; redirect to our actual main.
++ * Android has no SDL2main: SDLActivity dlsym()s "SDL_main" out of the game
++ * library, which main_pc.c already provides under that name. This shim would
++ * be a duplicate symbol there (and it would call a main() that no longer
++ * exists). */
++#ifndef __ANDROID__
+ extern int main(int argc, char* argv[]);
+ int SDL_main(int argc, char* argv[]) { return main(argc, argv); }
++#endif
+ 
+ void CdMix() { }
+ void CdRead2() { }
+diff --git a/src/bodyprog/3d_audio.c b/src/bodyprog/3d_audio.c
+index 9d90579a5..5f23d384c 100644
+--- a/src/bodyprog/3d_audio.c
++++ b/src/bodyprog/3d_audio.c
+@@ -11,6 +11,8 @@
+ #include "bodyprog/sound/sound_system.h"
+ #ifdef SH_PC_PORT
+ #include "sh_log.h"
++/* Declared before use (see maps/characters/air_screamer.c). */
++void func_8005DE0C(e_SfxId sfxId, VECTOR3* pos, s32 vol, q19_12 falloff, s8 pitch);
+ #endif
+ 
+ VECTOR3 D_800C42C0;
+diff --git a/src/maps/characters/air_screamer.c b/src/maps/characters/air_screamer.c
+index 503020c81..ab990e415 100644
+--- a/src/maps/characters/air_screamer.c
++++ b/src/maps/characters/air_screamer.c
+@@ -5,6 +5,10 @@
+ #include "main/rng.h"
+ #include "maps/shared.h"
+ #include "maps/characters/air_screamer.h"
++/* Declared before use: these are called above their definitions, and an
++ * implicit int() declaration conflicts with the void definitions below. */
++void Ai_AirScreamer_GroundWarp(s_SubCharacter* airScreamer);
++void Ai_AirScreamer_Control_0(s_SubCharacter* airScreamer);
+ bool Ai_AirScreamer_Control(s_SubCharacter* airScreamer);bool Ai_AirScreamer_Init(s_SubCharacter* airScreamer);
+ 
+ // NOTES:
+diff --git a/src/maps/characters/cybil.c b/src/maps/characters/cybil.c
+index 2ccc31662..05080d7da 100644
+--- a/src/maps/characters/cybil.c
++++ b/src/maps/characters/cybil.c
+@@ -7,6 +7,12 @@
+ #include "main/rng.h"
+ #include "maps/shared.h"
+ #include "maps/characters/cybil.h"
++/* Declared before use (see air_screamer.c): implicit int() declarations
++ * conflict with these void definitions. */
++void Ai_Cybil_AnimUpdate(s_SubCharacter* chara, s_AnmHeader* animHdr, GsCOORDINATE2* coords);
++void Ai_Cybil_MovementUpdate(s_SubCharacter* chara, GsCOORDINATE2* coords);
++void Ai_Cybil_AnimStateUpdate(s_SubCharacter* chara, GsCOORDINATE2* coords);
++void Ai_Cybil_Init(s_SubCharacter* chara);
+ 
+ /** AI code for `Chara_Cybil`
+  *
+diff --git a/src/maps/characters/larval_stalker.c b/src/maps/characters/larval_stalker.c
+index b5043b69d..ad794e82c 100644
+--- a/src/maps/characters/larval_stalker.c
++++ b/src/maps/characters/larval_stalker.c
+@@ -6,6 +6,11 @@
+ #include "maps/shared.h"
+ #include "maps/characters/larval_stalker.h"
+ #include "sh_log.h"
++/* Declared before use (see air_screamer.c): implicit int() declarations
++ * conflict with these void definitions. */
++void Ai_LarvalStalker_ControlUpdate(s_SubCharacter* larvalStalker);
++void Ai_LarvalStalker_Init(s_SubCharacter* larvalStalker);
++void sharedFunc_800D1DBC_1_s00(s_SubCharacter* larvalStalker);
+ 
+ #define larvalStalkerProps larvalStalker->properties.larvalStalker
+ 
+diff --git a/src/maps/map5_s01/unk_draw_800CD20C.c b/src/maps/map5_s01/unk_draw_800CD20C.c
+index 542588fcd..613b0e11e 100644
+--- a/src/maps/map5_s01/unk_draw_800CD20C.c
++++ b/src/maps/map5_s01/unk_draw_800CD20C.c
+@@ -3,6 +3,8 @@
+ #include "bodyprog/math/math.h"
+ #include "bodyprog/sound/sound_system.h"
+ #include "maps/map5/map5_s01.h"
++/* Declared before use (see maps/characters/air_screamer.c). */
++void func_800CDA8C(void);
+ 
+ s16 func_800CD20C(void) // 0x800CD20C
+ {

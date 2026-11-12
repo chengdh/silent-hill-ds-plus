@@ -5,6 +5,8 @@
 > 最省事的方式：`docker build -t sh-android-builder -f android/Dockerfile android`，
 > 然后 `docker run --rm -v "$PWD":/work -w /work/silent-hill sh-android-builder sh android/build.sh all`。
 > 产物在 `dist/SilentHill-Android-debug.apk`。**APK 不含任何游戏数据**，需要你自己准备 Silent Hill 光盘镜像。
+>
+> 该链路已在 Docker 中从零跑通并产出 APK（详见 [Verified build](#verified-build)）；尚未在真机/模拟器上运行过。
 
 ---
 
@@ -22,7 +24,8 @@ upstream commit* (`patches/manifest.json`), targeting a single screen:
 ```
 upstream silent-hill-decomp @ 60ed020… (pc-port)
   + PsyCross submodule @ 20a2fb4…
-  + patches/silent-hill-android.patch   (this directory, 2 files, 7 hunks)
+  + patches/silent-hill-android.patch   (10 files, shared-lib target + GLES + portability fixes)
+  + patches/psycross-android.patch      (4 files, GLES/Android fixes inside the submodule)
   + native/sh_android.{c,h}             (startup shim)
         |
         v  NDK CMake toolchain -> libmain.so  (SDL_main entry point)
@@ -32,9 +35,12 @@ upstream silent-hill-decomp @ 60ed020… (pc-port)
         v  Gradle -> app-debug.apk
 ```
 
-Upstream PsyCross already contains a fixed-target `__ANDROID__` /
-`RENDERER_OGLES` / `OGLES_VERSION=3` path, so no renderer port is needed here;
-the work is almost entirely build-system and platform plumbing.
+Upstream PsyCross *advertises* an `__ANDROID__` / `RENDERER_OGLES` /
+`OGLES_VERSION=3` path, but that branch had never been compiled: it defines
+`eprintinfof`/`eprintwarnf` while the engine calls `eprintinfo`/`eprintwarn`,
+it feeds runtime strings to `__android_log_print()`, and it uses `__rdtsc()`
+and desktop-only GL tokens. `patches/psycross-android.patch` fixes exactly
+those; the actual renderer port is upstream's.
 
 The original `tools/build.sh`, `tools/package.py` and both `*-rgds.patch`
 files are **not modified**. Both builds can coexist in the same checkout.
@@ -46,8 +52,8 @@ files are **not modified**. Both builds can coexist in the same checkout.
 | Android SDK | platform android-34, build-tools 34.0.0, platform-tools |
 | Android NDK | `27.2.12479018` |
 | JDK | 17 |
-| Gradle | 8.7+ (8.9 in the Dockerfile) |
-| CMake / Ninja / Python 3 / git | recent |
+| Gradle | 8.7+ (8.11.1 tested, 8.9 in the Dockerfile default) |
+| CMake / Ninja / Python 3 / git | recent (CMake 4.x also works) |
 
 Set `ANDROID_SDK_ROOT` (or `ANDROID_HOME`); `ANDROID_NDK_HOME` is optional and
 defaults to `$ANDROID_SDK_ROOT/ndk/<version>`. `GRADLE_BIN` overrides the
@@ -62,9 +68,45 @@ Individual steps: `fetch`, `deps`, `game`, `stage`, `apk`. All sources are
 pinned in `versions.env`; fetched sources and build trees live under
 `.android-work/` (git-ignored). Re-running a step is safe.
 
-The supplied `Dockerfile` installs the SDK, NDK, Gradle and JDK; it only needs
+The supplied `Dockerfile` installs the SDK, NDK, JDK and Gradle; it only needs
 network access for the SDK download, the git clones and the Android Gradle
-Plugin on the first Gradle run.
+Plugin on the first Gradle run. `--build-arg BASE_IMAGE=<image>` swaps the base
+image: any image carrying JDK 17 works, which is handy when an SDK/NDK is
+already baked into another image.
+
+### Container gotchas (these cost real time)
+
+* **The Linux NDK is x86_64-only.** On an Apple Silicon host, a native
+  `linux/arm64` container cannot run NDK clang at all (`rosetta error: failed
+  to open elf at /lib64/ld-linux-x86-64.so.2`). Run the amd64 variant:
+  `docker run --platform linux/amd64 …`. On x86_64 hosts nothing changes.
+* **A pre-baked `init.gradle` breaks Gradle.** Some Android images ship
+  `/opt/gradle-home/init.gradle` that injects a `maven` repository, which
+  `settings.gradle`'s `FAIL_ON_PROJECT_REPOS` policy rejects. Point Gradle
+  elsewhere: `GRADLE_USER_HOME=/tmp/gh sh android/build.sh apk`.
+* **Slow or proxied GitHub.** `fetch` uses single-commit shallow clones, but a
+  blocked link still stalls. Rewrite the URL instead of touching the scripts:
+  `git config --global url."https://<proxy>/https://github.com/".insteadOf "https://github.com/"`.
+
+## Verified build
+
+`sh android/build.sh all` was executed end to end in `docker` (Ubuntu 26.04,
+JDK 17.0.19, Gradle 8.11.1, NDK 27.2.12479018, platform 34, CMake 4.2.3) from a
+clean source tree — patches applied, dependencies compiled, APK assembled:
+
+| Artifact | Result |
+| --- | --- |
+| `libmain.so` | 33 MB, AArch64 `DYN`, `SONAME=libmain.so` |
+| `NEEDED` | `libSDL2.so`, `libopenal.so`, `libc++_shared.so`, `libGLESv3.so`, `libEGL.so`, `liblog.so`, `libm/libdl/libc` |
+| Exported entry | `SDL_main` (`T`, found by `SDLActivity`'s `dlsym`) |
+| Static map overlays | 43 map targets linked into `libmain.so` |
+| `dist/SilentHill-Android-debug.apk` | 26 MB, `arm64-v8a`, minSdk 24, targetSdk 34 |
+| APK payload | `lib/arm64-v8a/{libmain,libSDL2,libopenal,libc++_shared}.so`, fonts, `gamecontrollerdb.txt`, `config.cfg`, licence texts — **no game data** |
+
+Both patches were also verified with `git apply --cached --check` against the
+pristine pinned commits. What has **not** happened is a launch on a device or
+emulator, so expect runtime (driver, audio backend, touch/gamepad) issues
+rather than build issues.
 
 ## Build details / design decisions
 
@@ -91,6 +133,16 @@ Plugin on the first Gradle run.
   chdirs into `getExternalFilesDir(null)` and creates `gamedata/`,
   `gamedata/save/`, `logs/` and `licenses/` before anything opens a file. The
   Java activity passes `-data <externalFilesDir>/gamedata` to `ParseArgs()`.
+* **Single-commit clones.** Only one pinned tree is ever built, so `fetch`
+  clones with `--depth 1` (by ref, or by SHA when the pin is a raw commit).
+  Full-history clones of these repos are hundreds of megabytes and routinely
+  die mid-transfer on slow links, turning a two-minute fetch into a restart.
+* **NDK clang is stricter than the compilers this decomp grew up with.** It
+  promotes implicit declarations/int conversions and `format-security` to
+  errors. `build.sh` relaxes those via `WARN_ARGS` instead of editing thousands
+  of decompiled lines; the handful of genuine hard errors (missing prototypes,
+  desktop-only GL tokens, an unguarded `__rdtsc()`, an SDL_main shim that
+  collides on Android) are fixed in the patches.
 * **`extractNativeLibs=true`.** `SDLActivity.getMainSharedObject()` dlopens a
   real path inside `nativeLibraryDir`, so the `.so` files must be extracted;
   both the manifest and `app/build.gradle` enforce this.
@@ -121,10 +173,12 @@ Audio uses OpenAL Soft's OpenSL ES backend; SDL's own audio driver is set to
 ## Known limitations
 
 * This is **build-system support**, not a validated device port. The pipeline
-  was assembled against the pinned upstream sources and statically checked
-  (patch applies cleanly, scripts and manifests parsed), but no Android device
-  build/run was performed while adding it. Expect driver- and NDK-specific
-  fixes on the first real compile and please report them.
+  was executed end to end in Docker and produced a working APK (see
+  [Verified build](#verified-build)), and both patches were checked against the
+  pristine pinned commits, but nothing has been launched on a device or
+  emulator yet. Expect runtime rather than build problems — GLES driver
+  quirks, the OpenSL ES audio path, touch/controller mapping — and please
+  report them.
 * Single screen only: the live bottom-screen inventory/map from the RG DS Plus
   port is not part of this build.
 * 64-bit ARM only; `SH_STATIC_MAPS` raises the resident set considerably and
@@ -146,7 +200,8 @@ android/
   Dockerfile             SDK/NDK/Gradle/JDK build image
   build.sh               fetch / deps / game / stage / apk driver
   versions.env           pinned upstream + third-party versions
-  patches/               silent-hill-android.patch (applied to upstream)
+  patches/               silent-hill-android.patch (upstream tree)
+                         psycross-android.patch   (inside the submodule)
   native/                sh_android.c / .h (copied into pc_port at fetch time)
   cmake/                 FindSDL2.cmake, FindOpenAL.cmake
   tools/stage.py         asset whitelist, config overrides, Gradle staging

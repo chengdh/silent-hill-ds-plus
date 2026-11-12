@@ -1,0 +1,226 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Android build driver for Silent Hill DS+.
+#
+#   android/build.sh check            verify the host toolchain
+#   android/build.sh fetch            clone pinned sources, apply the patch
+#   android/build.sh deps             build SDL2 / OpenAL Soft / libjpeg with the NDK
+#   android/build.sh game             build libmain.so (the patched upstream pc_port)
+#   android/build.sh stage            stage libs, SDL Java sources and APK assets
+#   android/build.sh apk              assemble the debug APK with Gradle
+#   android/build.sh all              all of the above (default)
+#
+# The RG DS Plus build (tools/build.sh + patches/*-rgds.patch) is untouched:
+# this is a separate, single-screen native port built from the same pinned
+# upstream commit. See android/README.md.
+
+set -eu
+
+HERE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$HERE/.." && pwd)
+. "$HERE/versions.env"
+
+WORK=${SH_ANDROID_WORK:-"$ROOT/.android-work"}
+UPSTREAM="$WORK/upstream"
+THIRD="$WORK/third_party"
+MODE=${1:-all}
+
+die()  { echo "android/build.sh: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing tool: $1"; }
+log()  { printf '\n=== %s ===\n' "$*"; }
+
+ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}
+[ -n "$ANDROID_SDK_ROOT" ] || die "set ANDROID_SDK_ROOT (or ANDROID_HOME) to your Android SDK"
+NDK=${ANDROID_NDK_HOME:-"$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION"}
+TOOLCHAIN="$NDK/build/cmake/android.toolchain.cmake"
+JOBS=${JOBS:-$(python3 -c 'import os; print(os.cpu_count() or 4)')}
+PYTHON=$(command -v python3)
+
+case "$(uname -s)" in
+    Darwin) HOST_TAG=darwin-x86_64 ;;
+    Linux)  HOST_TAG=linux-x86_64 ;;
+    *)      die "unsupported host OS (need an NDK prebuilt for it)" ;;
+esac
+LLVM_NM="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/llvm-nm"
+LLVM_OBJCOPY="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/llvm-objcopy"
+
+# Needed by SH_STATIC_MAPS (pc_port/tools/prefix_map_syms.py) and by
+# gen_build_info.cmake; host tools must not be looked up in the target sysroot.
+ROOT_PATH_ARGS='-DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY'
+
+# The decomp is a WIP and relies on implicit declarations / int-to-pointer
+# conversions. NDK Clang turns several of those into errors by default.
+WARN_ARGS='-Wno-unknown-warning-option -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=return-mismatch -Wno-error=declaration-missing-parameter-type'
+
+check_host() {
+    need git
+    need cmake
+    need ninja
+    need python3
+    need curl
+    [ -f "$TOOLCHAIN" ] || die "NDK $ANDROID_NDK_VERSION not found at $NDK (install it with sdkmanager)"
+    [ -x "$LLVM_NM" ] || die "missing $LLVM_NM (SH_STATIC_MAPS needs llvm-nm)"
+    [ -x "$LLVM_OBJCOPY" ] || die "missing $LLVM_OBJCOPY (SH_STATIC_MAPS needs llvm-objcopy)"
+    [ -d "$ANDROID_SDK_ROOT/platforms/android-$ANDROID_COMPILE_SDK" ] || \
+        die "missing Android platform $ANDROID_COMPILE_SDK in $ANDROID_SDK_ROOT"
+    echo "SDK:      $ANDROID_SDK_ROOT"
+    echo "NDK:      $NDK"
+    echo "ABIs:     $ANDROID_ABIS"
+    echo "Work dir: $WORK"
+}
+
+clone_pinned() {
+    _url=$1; _ref=$2; _dir=$3
+    if [ ! -d "$_dir/.git" ]; then
+        mkdir -p "$(dirname "$_dir")"
+        log "cloning $_url"
+        git clone --quiet "$_url" "$_dir"
+    fi
+    git -C "$_dir" checkout --quiet "$_ref"
+}
+
+fetch_sources() {
+    log "fetching pinned sources"
+    clone_pinned "$UPSTREAM_REPO" "$UPSTREAM_COMMIT" "$UPSTREAM"
+    clone_pinned "$SDL2_REPO"     "$SDL2_REF"       "$THIRD/SDL"
+    clone_pinned "$OPENAL_REPO"   "$OPENAL_REF"     "$THIRD/openal-soft"
+    clone_pinned "$JPEG_REPO"     "$JPEG_REF"       "$THIRD/libjpeg-turbo"
+
+    git -C "$UPSTREAM" submodule update --init pc_port/PsyCross
+    _psycross=$(git -C "$UPSTREAM/pc_port/PsyCross" rev-parse HEAD)
+    [ "$_psycross" = "$PSYCROSS_COMMIT" ] || \
+        die "PsyCross submodule is at $_psycross, expected $PSYCROSS_COMMIT"
+
+    # The RG DS Plus patch is deliberately NOT applied: it is a two-process,
+    # two-window Wayland port for the RG DS hardware. Android uses the upstream
+    # single-screen code with only the small Android adaptation patch.
+    _stamp="$UPSTREAM/.sh-android-patched"
+    if [ ! -f "$_stamp" ]; then
+        cp "$HERE/native/sh_android.c" "$UPSTREAM/pc_port/src/sh_android.c"
+        cp "$HERE/native/sh_android.h" "$UPSTREAM/pc_port/include/sh_android.h"
+        git -C "$UPSTREAM" apply "$HERE/patches/silent-hill-android.patch" || \
+            die "android patch failed to apply (is UPSTREAM_COMMIT still $UPSTREAM_COMMIT?)"
+        touch "$_stamp"
+    fi
+}
+
+ndk_cmake() {
+    # shellcheck disable=SC2086
+    cmake -G Ninja \
+        -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
+        -DANDROID_ABI="$ABI" \
+        -DANDROID_PLATFORM="$ANDROID_PLATFORM" \
+        -DANDROID_STL="$ANDROID_STL" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=TRUE \
+        $ROOT_PATH_ARGS \
+        "$@"
+}
+
+build_deps() {
+    mkdir -p "$WORK/deps-build"
+    for dep in SDL openal-soft libjpeg-turbo; do
+        src="$THIRD/$dep"
+        [ -f "$src/CMakeLists.txt" ] || die "$src is missing; run: android/build.sh fetch"
+    done
+
+    log "building SDL2 $SDL2_REF"
+    ndk_cmake -S "$THIRD/SDL" -B "$WORK/deps-build/$ABI/SDL" \
+        -DCMAKE_INSTALL_PREFIX="$DEPS" \
+        -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-soname,libSDL2.so" \
+        -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF -DSDL_TESTS=OFF \
+        -DSDL2_DISABLE_SDL2MAIN=ON -DSDL2_DISABLE_INSTALL=OFF
+    cmake --build "$WORK/deps-build/$ABI/SDL" -j "$JOBS"
+    cmake --install "$WORK/deps-build/$ABI/SDL"
+
+    log "building OpenAL Soft $OPENAL_REF"
+    ndk_cmake -S "$THIRD/openal-soft" -B "$WORK/deps-build/$ABI/openal" \
+        -DCMAKE_INSTALL_PREFIX="$DEPS" \
+        -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-soname,libopenal.so" \
+        -DLIBTYPE=SHARED -DALSOFT_ENABLE_MODULES=OFF \
+        -DALSOFT_UTILS=OFF -DALSOFT_EXAMPLES=OFF -DALSOFT_TESTS=OFF \
+        -DALSOFT_INSTALL_CONFIG=OFF -DALSOFT_INSTALL_HRTF_DATA=OFF \
+        -DALSOFT_INSTALL_AMBDEC_PRESETS=OFF -DALSOFT_INSTALL_EXAMPLES=OFF \
+        -DALSOFT_INSTALL_UTILS=OFF -DALSOFT_UPDATE_BUILD_VERSION=OFF \
+        -DALSOFT_BACKEND_PIPEWIRE=OFF -DALSOFT_BACKEND_PULSEAUDIO=OFF \
+        -DALSOFT_BACKEND_ALSA=OFF -DALSOFT_BACKEND_OSS=OFF \
+        -DALSOFT_BACKEND_JACK=OFF -DALSOFT_BACKEND_SNDIO=OFF \
+        -DALSOFT_BACKEND_OBOE=OFF -DALSOFT_BACKEND_OPENSL=ON
+    cmake --build "$WORK/deps-build/$ABI/openal" -j "$JOBS"
+    cmake --install "$WORK/deps-build/$ABI/openal"
+
+    log "building libjpeg-turbo $JPEG_REF (static)"
+    ndk_cmake -S "$THIRD/libjpeg-turbo" -B "$WORK/deps-build/$ABI/jpeg" \
+        -DCMAKE_INSTALL_PREFIX="$DEPS" -DCMAKE_INSTALL_LIBDIR=lib \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_SIMD=OFF \
+        -DWITH_TURBOJPEG=OFF
+    cmake --build "$WORK/deps-build/$ABI/jpeg" -j "$JOBS"
+    cmake --install "$WORK/deps-build/$ABI/jpeg"
+
+    for f in libSDL2.so libopenal.so libjpeg.a; do
+        [ -f "$DEPS/lib/$f" ] || die "dependency build did not produce $DEPS/lib/$f"
+    done
+}
+
+build_game() {
+    log "building libmain.so for $ABI"
+    [ -f "$UPSTREAM/.sh-android-patched" ] || die "run: android/build.sh fetch"
+    # shellcheck disable=SC2086
+    ndk_cmake -S "$UPSTREAM/pc_port" -B "$BUILD" \
+        -DCMAKE_MODULE_PATH="$HERE/cmake" \
+        -DSH_ANDROID_DEPS_PREFIX="$DEPS" \
+        -DCMAKE_C_FLAGS="$WARN_ARGS" \
+        -DCMAKE_CXX_FLAGS="-Wno-unknown-warning-option" \
+        -DJPEG_LIBRARY="$DEPS/lib/libjpeg.a" \
+        -DJPEG_INCLUDE_DIR="$DEPS/include" \
+        -DSH_STATIC_MAPS=ON -DSH_BUILD_MAP_DLLS=OFF \
+        -DSH_ENABLE_RETROACHIEVEMENTS=OFF -DSH_FMV_FFMPEG=OFF -DSH_DEBUG=OFF \
+        -DSH_VERSION=USA -DBUILD_TESTING=OFF \
+        -DPython3_EXECUTABLE="$PYTHON" \
+        -DSH_LLVM_NM="$LLVM_NM" -DSH_LLVM_OBJCOPY="$LLVM_OBJCOPY"
+    cmake --build "$BUILD" --target SilentHillPC -j "$JOBS"
+    [ -f "$BUILD/libmain.so" ] || die "build did not produce $BUILD/libmain.so"
+}
+
+stage_apk_inputs() {
+    log "staging Gradle inputs for $ABI"
+    python3 "$HERE/tools/stage.py" \
+        --root "$ROOT" --work "$WORK" --abi "$ABI" \
+        --deps "$DEPS" --build "$BUILD" --ndk "$NDK"
+}
+
+assemble_apk() {
+    log "assembling debug APK"
+    GRADLE=${GRADLE_BIN:-gradle}
+    need "$GRADLE"
+    (cd "$HERE" && "$GRADLE" --no-daemon :app:assembleDebug)
+    apk="$HERE/app/build/outputs/apk/debug/app-debug.apk"
+    [ -f "$apk" ] || die "Gradle did not produce $apk"
+    mkdir -p "$ROOT/dist"
+    out="$ROOT/dist/SilentHill-Android-debug.apk"
+    cp "$apk" "$out"
+    echo "APK: $out"
+}
+
+for_each_abi() {
+    _action=$1
+    for ABI in $ANDROID_ABIS; do
+        DEPS="$WORK/deps/$ABI"
+        BUILD="$WORK/build/$ABI"
+        "$_action"
+    done
+}
+
+case "$MODE" in
+    check) check_host ;;
+    fetch) check_host; fetch_sources ;;
+    deps)  check_host; fetch_sources; for_each_abi build_deps ;;
+    game)  check_host; for_each_abi build_game ;;
+    stage) for_each_abi stage_apk_inputs ;;
+    apk)   check_host; for_each_abi stage_apk_inputs; assemble_apk ;;
+    all)   check_host; fetch_sources; for_each_abi build_deps; for_each_abi build_game;
+           for_each_abi stage_apk_inputs; assemble_apk ;;
+    *)     die "unknown command '$MODE' (check|fetch|deps|game|stage|apk|all)" ;;
+esac

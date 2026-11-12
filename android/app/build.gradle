@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// The native libraries are built by android/build.sh with the NDK CMake
+// toolchain and dropped into app/libs/<abi>/. There is deliberately no
+// externalNativeBuild here: the game's CMake tree is the upstream pc_port
+// project, which is patched and configured by build.sh, not by AGP.
+
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.silenthill.android'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.silenthill.android'
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    sourceSets {
+        main {
+            // sdl-java/ is populated from SDL2's android-project by build.sh.
+            java.srcDirs = ['src/main/java', 'sdl-java']
+            jniLibs.srcDirs = ['libs']
+            assets.srcDirs = ['src/main/assets']
+        }
+    }
+
+    packagingOptions {
+        // SDLActivity.getMainSharedObject() dlopen()s a real path inside
+        // nativeLibraryDir, so the .so files must be extracted, not left
+        // uncompressed inside the APK. Matches android:extractNativeLibs.
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    lint {
+        abortOnError false
+    }
+}

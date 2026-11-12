@@ -91,6 +91,24 @@ python3 silent-hill/tools/make-release.py
 
 The zip ends up in `silent-hill/dist/`, the same as the one on the Releases page. Then go on with [Install](#install) from step 2. You don't need the disc to build.
 
+## Android build (experimental, separate branch)
+
+The `feat/android-build-support` branch adds an **independent Android build** of
+the same pinned upstream sources. It does not apply the RG DS Plus Wayland /
+two-screen patches and does not change anything in the RG DS Plus build above:
+single screen, SDL2 Activity, GLES 3, OpenAL Soft, NDK/CMake/Gradle, producing
+`dist/SilentHill-Android-debug.apk`.
+
+```sh
+sh android/build.sh check
+sh android/build.sh all
+```
+
+A Docker image with the SDK, NDK, JDK and Gradle is provided
+(`docker build -t sh-android-builder -f android/Dockerfile android`). See
+[android/README.md](android/README.md) for prerequisites, design decisions and
+known limitations. As always: no game files are included; you need your own disc.
+
 ## Credits
 
 - Konami, for Silent Hill (PlayStation, 1999). The game and all its content are © Konami.

@@ -1,0 +1,110 @@
+diff --git a/pc_port/CMakeLists.txt b/pc_port/CMakeLists.txt
+index fe2eb14..9f7ce8c 100644
+--- a/pc_port/CMakeLists.txt
++++ b/pc_port/CMakeLists.txt
+@@ -253,7 +253,11 @@ else()
+     message(STATUS "Lua scripting: disabled (third_party/lua missing)")
+ endif()
+ 
+-add_executable(SilentHillPC
++# SDL2's Android activity loads the game with System.loadLibrary() and calls
++# SDL_main in that library. An ELF executable cannot be loaded that way, so on
++# Android the same sources become libmain.so instead of the SilentHillPC binary.
++# See android/README.md in the port repository for the full build pipeline.
++set(SH_PC_SOURCES
+     ${PC_PORT_SOURCES}
+     ${MAIN_SOURCES}
+     ${BODYPROG_SOURCES}
+@@ -261,6 +265,12 @@ add_executable(SilentHillPC
+     ${MAP_SOURCES}
+     ${SH_APP_RESOURCES}
+ )
++if(ANDROID)
++    add_library(SilentHillPC SHARED ${SH_PC_SOURCES})
++    set_target_properties(SilentHillPC PROPERTIES OUTPUT_NAME "main")
++else()
++    add_executable(SilentHillPC ${SH_PC_SOURCES})
++endif()
+ 
+ # Export symbols from the executable so map overlay DLLs can link against it.
+ # On Linux, ENABLE_EXPORTS adds -rdynamic so dlopen'd libraries see exe symbols.
+@@ -605,6 +615,19 @@ endif()
+ 
+ if(WIN32)
+     target_link_libraries(SilentHillPC PRIVATE opengl32 winmm m)
++elseif(ANDROID)
++    # PsyCross selects RENDERER_OGLES / OGLES_VERSION=3 for __ANDROID__, so the
++    # desktop OpenGL loader is neither needed nor available here. The NDK ships
++    # these as stub libraries; the real drivers are provided by the device.
++    find_library(SH_GLES_LIBRARY GLESv3)
++    find_library(SH_EGL_LIBRARY EGL)
++    find_library(SH_ANDROID_LOG_LIBRARY log)
++    if(NOT SH_GLES_LIBRARY OR NOT SH_EGL_LIBRARY OR NOT SH_ANDROID_LOG_LIBRARY)
++        message(FATAL_ERROR "Android build needs the NDK's GLESv3, EGL and log libraries")
++    endif()
++    target_link_libraries(SilentHillPC PRIVATE
++        ${SH_GLES_LIBRARY} ${SH_EGL_LIBRARY} ${SH_ANDROID_LOG_LIBRARY})
++    target_compile_definitions(SilentHillPC PRIVATE SH_ANDROID=1)
+ elseif(UNIX)
+     find_package(OpenGL REQUIRED)
+     target_link_libraries(SilentHillPC PRIVATE OpenGL::GL)
+@@ -709,6 +732,12 @@ option(SH_STATIC_MAPS "Link map overlays into the executable with per-map symbol
+ if(IOS AND NOT SH_BUILD_MAP_DLLS)
+     set(SH_STATIC_MAPS ON CACHE BOOL "" FORCE)
+ endif()
++# Android can only dlopen libraries that came from the APK, and scoped storage
++# is not executable. Use the same statically linked overlay path as iOS by
++# default, so no loose maps/*.so has to be loaded at runtime.
++if(ANDROID AND NOT SH_BUILD_MAP_DLLS)
++    set(SH_STATIC_MAPS ON CACHE BOOL "" FORCE)
++endif()
+ if(SH_BUILD_MAP_DLLS AND SH_STATIC_MAPS)
+     message(FATAL_ERROR "SH_BUILD_MAP_DLLS and SH_STATIC_MAPS are mutually exclusive.")
+ endif()
+@@ -802,7 +831,10 @@ endif()
+ # =============================================================================
+ # Install
+ # =============================================================================
+-install(TARGETS SilentHillPC RUNTIME DESTINATION bin)
++# On Android the shared library is staged into the APK's jniLibs instead.
++if(NOT ANDROID)
++    install(TARGETS SilentHillPC RUNTIME DESTINATION bin)
++endif()
+ 
+ # =============================================================================
+ # Tests (-DBUILD_TESTING=ON, then ctest)
+diff --git a/pc_port/src/main_pc.c b/pc_port/src/main_pc.c
+index 5bd38cd..a2ac4e9 100644
+--- a/pc_port/src/main_pc.c
++++ b/pc_port/src/main_pc.c
+@@ -13,9 +13,17 @@
+ #include <dirent.h>
+ #include <time.h>
+ 
++/* SDL2's Android activity launches the game through SDL_main in libmain.so.
++ * Everywhere else the port owns its real main() and opts out of SDL's rename. */
++#ifndef __ANDROID__
+ #define SDL_MAIN_HANDLED
++#endif
+ #include <SDL.h>
+ 
++#ifdef __ANDROID__
++#include "sh_android.h" /* SH_AndroidPrepare() - anchors the working directory */
++#endif
++
+ #include "common.h"
+ #include "game.h"
+ #include "gpu.h"
+@@ -717,6 +725,12 @@ static int Pc_UnfilteredPrim(int tpage, int clut)
+ 
+ int main(int argc, char* argv[])
+ {
++#ifdef __ANDROID__
++    /* SDL starts native code with cwd = "/". config.cfg, gamedata/ and the
++     * log files are all relative paths, so anchor them before anything opens
++     * a file. The Java activity passes -data <externalFilesDir>/gamedata. */
++    SH_AndroidPrepare();
++#endif
+     /* Log file is NOT opened until after config load. SH_DBG calls before
+      * that point are silently no-ops (the macro short-circuits on a NULL
+      * handle). Avoids creating SilentHill.log when enable_debug_log=0. */

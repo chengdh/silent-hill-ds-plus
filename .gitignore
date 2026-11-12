@@ -21,3 +21,16 @@ dist/
 *.tar.gz
 __pycache__/
 .DS_Store
+
+# Android build: fetched sources, intermediate builds and Gradle outputs.
+.android-work/
+.gradle/
+android/build/
+android/app/build/
+android/app/libs/
+android/app/sdl-java/
+android/app/src/main/assets/
+android/.gradle/
+local.properties
+*.apk
+*.aab

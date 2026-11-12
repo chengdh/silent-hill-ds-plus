@@ -46,10 +46,34 @@ index 031c91d..65849d5 100644
  
  void PsyX_Log(const char* fmt, ...)
 diff --git a/src/gpu/PsyX_GPU.cpp b/src/gpu/PsyX_GPU.cpp
-index 0b71c97..53793da 100644
+index 0b71c97..5a1e065 100644
 --- a/src/gpu/PsyX_GPU.cpp
 +++ b/src/gpu/PsyX_GPU.cpp
-@@ -388,7 +388,16 @@ static unsigned s_wmDevPrims, s_wmPrecPrims;
+@@ -28,6 +28,23 @@ extern "C" int g_PsxFrame3dClass;
+ 
+ OT_TAG prim_terminator = { (uintptr_t)-1, 0 }; // P_TAG with zero primLength
+ 
++/* Android's allocator (Scudo) puts a random tag in the top byte of every heap
++ * pointer. AArch64 ignores that byte when it dereferences, so the pointers are
++ * perfectly good -- but any numeric comparison against a fixed bound sees
++ * 0xB4xxxxxxxxxxxx and concludes the address is garbage. Every pointer bound
++ * check below therefore compares the TAG-STRIPPED value while still walking
++ * with the original pointer, which keeps dereferences working whatever the
++ * platform does with the tag byte.
++ *
++ * This is what black-screened the Android build with a disc in: the OT chain
++ * walk found a next pointer tagged 0xB4, called it an unmapped address, halted
++ * on the first node, and the frame ended up with zero parsed vertices -- while
++ * the game itself kept running at 24 fps behind the black. */
++static inline uintptr_t PsxPtrNotag(uintptr_t p)
++{
++	return p & (uintptr_t)0x00FFFFFFFFFFFFFFULL;
++}
++
+ extern "C" void GR_CaptureFrameToVramRect(int x, int y, int w, int h);
+ int g_currentOTBucketCount = 0;
+ float g_otBucketDepth = 0.0f;
+@@ -388,7 +405,16 @@ static unsigned s_wmDevPrims, s_wmPrecPrims;
  extern "C" { double g_wmTParse = 0, g_wmTDraw = 0, g_wmTChunks = 0, g_wmTXform = 0, g_wmTMesh = 0; unsigned g_wmSplits = 0, g_wmVerts = 0, g_wmOtDraws = 0; }
  static Uint64 s_wmFrameStart = 0;
  /* Probe-frame cycle counts per GT4 parse step (world prims are GT4). */
@@ -67,7 +91,7 @@ index 0b71c97..53793da 100644
  static unsigned long long s_wmCyc[9];
  static unsigned s_wmGt4;
  /* Probe-frame parse cost by prim class: [code>>4], 16 = 0xB5 far quads,
-@@ -398,8 +407,8 @@ static unsigned long long s_wmClsCyc[18];
+@@ -398,8 +424,8 @@ static unsigned long long s_wmClsCyc[18];
  static unsigned s_wmClsN[18];
  static unsigned long long s_wmTscStart;
  extern "C" { double g_wmTGpu = 0; unsigned g_wmFarQuads = 0, g_wmFarSplits = 0, g_wmFarFlushes = 0, g_wmFarMeshKeys = 0, g_wmFarMeshDraws = 0, g_wmFarMeshQueued = 0; }
@@ -78,7 +102,7 @@ index 0b71c97..53793da 100644
  static unsigned s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmAffineVerts, s_wmPreciseVerts;
  static float s_wmWMin, s_wmWMax;
  static unsigned char s_lastLookupFar;
-@@ -456,7 +465,7 @@ extern "C" void PGXP_CoverageTick(void)
+@@ -456,7 +482,7 @@ extern "C" void PGXP_CoverageTick(void)
  			g_wmTChunks, g_wmTParse, g_wmTDraw, g_wmTXform, g_wmTMesh, g_wmOtDraws, g_wmSplits, g_wmVerts);
  		{
  			const double frameMs = (double)(SDL_GetPerformanceCounter() - s_wmFrameStart) * 1000.0 / (double)SDL_GetPerformanceFrequency();
@@ -87,7 +111,7 @@ index 0b71c97..53793da 100644
  			char buf[1024];
  			int len = 0;
  			for (int c = 0; c < 18; c++)
-@@ -486,7 +495,7 @@ extern "C" void PGXP_CoverageTick(void)
+@@ -486,7 +512,7 @@ extern "C" void PGXP_CoverageTick(void)
  		s_wmDevPrims = s_wmPrecPrims = 0;
  		memset(s_wmCyc, 0, sizeof(s_wmCyc)); s_wmGt4 = 0;
  		memset(s_wmClsCyc, 0, sizeof(s_wmClsCyc)); memset(s_wmClsN, 0, sizeof(s_wmClsN));
@@ -96,6 +120,44 @@ index 0b71c97..53793da 100644
  		g_wmTParse = g_wmTDraw = g_wmTChunks = g_wmTXform = g_wmTMesh = 0; g_wmSplits = g_wmVerts = g_wmOtDraws = 0;
  		s_wmFrameStart = SDL_GetPerformanceCounter();
  		g_PsxWholeMapProbe = 1;
+@@ -3509,7 +3535,9 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
+ 				}
+ 			}
+ 			else if (tagLength == 0 &&
+-			         !(basePacket >= g_PsxOtNoBucketLo && basePacket < g_PsxOtNoBucketHi))
++			         !(PsxPtrNotag(basePacket) >= PsxPtrNotag(g_PsxOtNoBucketLo) &&
++			           PsxPtrNotag(basePacket) <  PsxPtrNotag(g_PsxOtNoBucketHi) &&
++			           g_PsxOtNoBucketHi != 0))
+ 			{
+ 				// OT bucket boundary — advance to the next bucket's depth.
+ 				if (g_PsxUsePgxp && s_otViewZShift > 0)
+@@ -3574,19 +3602,22 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
+ 			//      0x7FFF'FFFF'FFFF; anything past that is kernel)   — break
+ 			//   4. Wild but technically-mapped — can't catch without
+ 			//      VirtualQuery; rely on the 1<<20 node safety counter.
+-			uintptr_t nextPtr = reinterpret_cast<uintptr_t>(nextPrim(basePacket));
++			uintptr_t nextRaw = reinterpret_cast<uintptr_t>(nextPrim(basePacket));
++			/* Strip the Android heap tag before judging the value; the walk
++			 * itself keeps the original pointer, which the MMU dereferences
++			 * fine. (uintptr_t)-1 also lands past the bound once stripped. */
++			uintptr_t nextPtr = PsxPtrNotag(nextRaw);
+ 			if (nextPtr < 0x10000 ||
+-			    nextPtr == static_cast<uintptr_t>(-1) ||
+ 			    nextPtr >= 0x7FFFFFFFFFFFULL) {
+ 				static int s_badNextLogged = 0;
+ 				if (s_badNextLogged < 16) {
+ 					eprintinfo("[OT] bad nextPtr=0x%llX at %p — chain walk halted\n",
+-						(unsigned long long)nextPtr, (void*)basePacket);
++						(unsigned long long)nextRaw, (void*)basePacket);
+ 					s_badNextLogged++;
+ 				}
+ 				break;
+ 			}
+-			basePacket = nextPtr;
++			basePacket = nextRaw;
+ 		}
+ 	}
+ }
 diff --git a/src/platform.h b/src/platform.h
 index 3f16bbe..8b03226 100644
 --- a/src/platform.h

@@ -1,3 +1,25 @@
+diff --git a/include/PsyX/PsyX_render.h b/include/PsyX/PsyX_render.h
+index 05929f3..5bb789f 100644
+--- a/include/PsyX/PsyX_render.h
++++ b/include/PsyX/PsyX_render.h
+@@ -130,8 +130,15 @@
+ #	define VRAM_FORMAT            GL_RG
+ #	define VRAM_INTERNAL_FORMAT   GL_RG8
+ #elif defined(RENDERER_OGLES)
+-#	define VRAM_FORMAT            GL_LUMINANCE_ALPHA
+-#	define VRAM_INTERNAL_FORMAT   GL_LUMINANCE_ALPHA
++/* GL_LUMINANCE_ALPHA does not exist in OpenGL ES, so the VRAM texture could
++ * never be created there: glTexImage2D failed with GL_INVALID_ENUM, the
++ * framebuffer that renders back into VRAM stayed incomplete, and every frame
++ * that blitted the screen into it raised GL_INVALID_FRAMEBUFFER_OPERATION
++ * (0x0506) and showed nothing. RG8 carries the same two bytes per PSX pixel
++ * and *is* colour-renderable in ES 3.0; the shader's VRAM() picks .rg for it,
++ * which reads the identical (high, low) byte pair LUMINANCE_ALPHA's .ra did. */
++#	define VRAM_FORMAT            GL_RG
++#	define VRAM_INTERNAL_FORMAT   GL_RG8
+ #endif
+ 
+ #define VRAM_WIDTH		(1024)
 diff --git a/src/PsyX_main.cpp b/src/PsyX_main.cpp
 index 031c91d..65849d5 100644
 --- a/src/PsyX_main.cpp
@@ -118,7 +140,7 @@ index 3f16bbe..8b03226 100644
  #   define eprintf(fmt, ...)       PsyX_Log("[Psy-X] " fmt, ##__VA_ARGS__)
  #   define eprintinfo(fmt, ...)    PsyX_Log_Info("[Psy-X] " fmt, ##__VA_ARGS__)
 diff --git a/src/render/PsyX_render.cpp b/src/render/PsyX_render.cpp
-index d67eade..3b536eb 100644
+index d67eade..3184067 100644
 --- a/src/render/PsyX_render.cpp
 +++ b/src/render/PsyX_render.cpp
 @@ -427,10 +427,14 @@ static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
@@ -208,3 +230,22 @@ index d67eade..3b536eb 100644
  	{
  		const GLenum none = GL_NONE;
  		glDrawBuffers(1, &none);
+@@ -6996,6 +7011,18 @@ void GR_DiagGLError(const char* where)
+ 
+ 	eprintwarn("[GLDIAG] GL error 0x%04X at %s (backend=%s)\n",
+ 		(unsigned)err, where, PsyX_Backend_GetName(g_grActiveBackend));
++
++#if defined(__ANDROID__)
++	/* 0x0506 (INVALID_FRAMEBUFFER_OPERATION) is opaque: name the binding and
++	 * why the driver calls it incomplete. */
++	{
++		GLint  fbo = -1;
++		GLenum st  = 0;
++		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fbo);
++		st = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
++		eprintwarn("[GLDIAG]   drawFBO=%d status=0x%04X\n", (int)fbo, (unsigned)st);
++	}
++#endif
+ }
+ 
+ /* [GREYFRAME] per-swap half, run on the window framebuffer right before the

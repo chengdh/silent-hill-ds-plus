@@ -2,8 +2,13 @@
 package com.silenthill.android;
 
 import android.content.Context;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.View;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.view.WindowManager;
 
 import org.libsdl.app.SDLActivity;
 
@@ -47,6 +52,49 @@ public class SilentHillActivity extends SDLActivity {
         // Must happen before super.onCreate(), which loads libmain.so.
         installAssets();
         super.onCreate(savedInstanceState);
+        // Straight after super.onCreate(), and still before the first layout pass:
+        // the surface has to be measured full-screen, otherwise it comes out one
+        // status/navigation bar short (1920x1025 on the AYN Thor). SDL keeps the
+        // EGL buffer geometry it got at surface creation, so every frame it swaps
+        // afterwards is 1025 tall and BufferQueue rejects it -- the game renders
+        // correctly but the screen stays black.
+        applyImmersiveMode();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            // A transient bar can come back (notification shade, IME); re-hide it
+            // before the surface is re-measured.
+            applyImmersiveMode();
+        }
+    }
+
+    /** Edge-to-edge, no status/navigation bar, and lay out into a display cutout. */
+    private void applyImmersiveMode() {
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+
+        // The legacy flags still do the work on this device and are harmless on
+        // newer releases; the insets controller is what actually pins it down.
+        View decor = getWindow().getDecorView();
+        decor.setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getWindow().setDecorFitsSystemWindows(false);
+            WindowInsetsController controller = decor.getWindowInsetsController();
+            if (controller != null) {
+                controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                controller.setSystemBarsBehavior(
+                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        }
     }
 
     /** Only files that are missing are copied: never overwrite user settings

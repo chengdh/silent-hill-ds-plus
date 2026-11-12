@@ -73,25 +73,105 @@ index fe2eb1489..9f7ce8c2f 100644
  
  # =============================================================================
  # Tests (-DBUILD_TESTING=ON, then ctest)
+diff --git a/pc_port/include/gl_compat.h b/pc_port/include/gl_compat.h
+new file mode 100644
+index 000000000..8f6a78e3d
+--- /dev/null
++++ b/pc_port/include/gl_compat.h
+@@ -0,0 +1,36 @@
++#ifndef GL_COMPAT_H
++#define GL_COMPAT_H
++
++/* Single place where the port reaches the GL entry points.
++ *
++ * Desktop builds go through PsyX's bundled glad loader: gladLoadGL() runs once
++ * after the context is made current and fills glad's function-pointer table.
++ *
++ * The GLES build does not use that loader (PsyX_render.h links the ES entry
++ * points directly, and its glad.h copy is generated for gles2=2.0 only), so
++ * every glad_gl* pointer stays NULL there. Including glad.h on this path does
++ * not fail to build -- it just makes each GL call jump to address 0 at runtime,
++ * which is exactly how HiresOverride_ClampBudgetToVram crashed on first launch
++ * (SIGSEGV at pc=0 from glGetIntegerv). Use the real ES headers instead.
++ */
++#if defined(__ANDROID__)
++#   include <GLES3/gl3.h>
++
++/* glGetTexLevelParameteriv, and these pnames with it, arrived in ES 3.1; the
++ * 3.0 headers do not define them. hires_override.c already gates the query on
++ * g_grCaps.texLevelParam (0 on ES 3.0), so the branch never executes here --
++ * it just has to compile. Values are the real GL ones, not placeholders. */
++#   ifndef GL_TEXTURE_WIDTH
++#      define GL_TEXTURE_WIDTH 0x1000
++#   endif
++#   ifndef GL_TEXTURE_HEIGHT
++#      define GL_TEXTURE_HEIGHT 0x1001
++#   endif
++#   ifndef GL_TEXTURE_INTERNAL_FORMAT
++#      define GL_TEXTURE_INTERNAL_FORMAT 0x1003
++#   endif
++#else
++#   include <PsyX/common/glad.h>
++#endif
++
++#endif /* GL_COMPAT_H */
+diff --git a/pc_port/src/dbg_overlay.c b/pc_port/src/dbg_overlay.c
+index e0291ba91..8542b038b 100644
+--- a/pc_port/src/dbg_overlay.c
++++ b/pc_port/src/dbg_overlay.c
+@@ -20,7 +20,7 @@
+ #include "screens/options.h" /* OptionsMenuState_* — Escape backs out of the brightness screen */
+ #include "pc_config.h"
+ 
+-#include <PsyX/common/glad.h>
++#include "gl_compat.h"
+ 
+ extern int g_windowWidth;
+ extern GLuint GR_ScreenFBO(void);
+diff --git a/pc_port/src/dds_load.c b/pc_port/src/dds_load.c
+index 172f0e168..f900978d7 100644
+--- a/pc_port/src/dds_load.c
++++ b/pc_port/src/dds_load.c
+@@ -25,7 +25,7 @@
+ #define BCDEC_IMPLEMENTATION
+ #include "bcdec.h"
+ 
+-#include <PsyX/common/glad.h>
++#include "gl_compat.h"
+ 
+ #ifndef GL_COMPRESSED_RGBA_BPTC_UNORM
+ #define GL_COMPRESSED_RGBA_BPTC_UNORM 0x8E8C
 diff --git a/pc_port/src/fmv/fmv_player.cpp b/pc_port/src/fmv/fmv_player.cpp
-index 939a3998f..1cb1fdd8a 100644
+index 939a3998f..0f957596b 100644
 --- a/pc_port/src/fmv/fmv_player.cpp
 +++ b/pc_port/src/fmv/fmv_player.cpp
-@@ -21,7 +21,12 @@
+@@ -21,7 +21,10 @@
  #include <PsyX/PsyX_render.h>
  #include <PsyX/PsyX_globals.h> /* g_windowWidth/Height = the scene-target size */
  #include <PsyX/util/timer.h>
+-#include <PsyX/common/glad.h>
 +/* On GLES builds PsyX_render.h has already pulled in the ES headers and glad.h
 + * refuses to be included on top of them. The GL entry points come from the ES
 + * headers there, so this include is desktop-only. */
-+#ifndef RENDERER_OGLES
- #include <PsyX/common/glad.h>
-+#endif
++#include "gl_compat.h"
  #include <PsyX/PsyX_backend.h>
  
  #include <psx/libgpu.h>
+diff --git a/pc_port/src/hires_override.c b/pc_port/src/hires_override.c
+index ce862aee3..649507850 100644
+--- a/pc_port/src/hires_override.c
++++ b/pc_port/src/hires_override.c
+@@ -98,7 +98,7 @@ static char* Png_Inflate(const char* buf, int len, int initialSize, int* outLen,
+ #include "sh_log.h"
+ #include "pc_config.h"
+ 
+-#include <PsyX/common/glad.h>
++#include "gl_compat.h"
+ #include <PsyX/PsyX_backend.h>
+ 
+ #define MAX_HIRES_OVERRIDES 256
 diff --git a/pc_port/src/main_pc.c b/pc_port/src/main_pc.c
-index 5bd38cdd5..a2ac4e961 100644
+index 5bd38cdd5..9fefda4c6 100644
 --- a/pc_port/src/main_pc.c
 +++ b/pc_port/src/main_pc.c
 @@ -13,9 +13,17 @@
@@ -112,6 +192,15 @@ index 5bd38cdd5..a2ac4e961 100644
  #include "common.h"
  #include "game.h"
  #include "gpu.h"
+@@ -40,7 +48,7 @@
+ /* PsyCross public API */
+ #include <PsyX/PsyX_public.h>
+ #include <PsyX/PsyX_backend.h>
+-#include <PsyX/common/glad.h>
++#include "gl_compat.h"
+ 
+ /* Null device differs by platform: NUL on Windows, /dev/null on POSIX. */
+ #ifdef _WIN32
 @@ -717,6 +725,12 @@ static int Pc_UnfilteredPrim(int tpage, int clut)
  
  int main(int argc, char* argv[])
@@ -125,6 +214,32 @@ index 5bd38cdd5..a2ac4e961 100644
      /* Log file is NOT opened until after config load. SH_DBG calls before
       * that point are silently no-ops (the macro short-circuits on a NULL
       * handle). Avoids creating SilentHill.log when enable_debug_log=0. */
+diff --git a/pc_port/src/pc_bind_panel.c b/pc_port/src/pc_bind_panel.c
+index ac8a64fd7..6f15ac12e 100644
+--- a/pc_port/src/pc_bind_panel.c
++++ b/pc_port/src/pc_bind_panel.c
+@@ -22,7 +22,7 @@
+ #include <string.h>
+ 
+ #include <SDL.h>
+-#include <PsyX/common/glad.h>
++#include "gl_compat.h"
+ #include <PsyX/PsyX_backend.h>
+ 
+ #include "stb_truetype.h"
+diff --git a/pc_port/src/pc_confirm_dialog.c b/pc_port/src/pc_confirm_dialog.c
+index 253ef4b43..4f5e42bf6 100644
+--- a/pc_port/src/pc_confirm_dialog.c
++++ b/pc_port/src/pc_confirm_dialog.c
+@@ -21,7 +21,7 @@
+ #include <string.h>
+ 
+ #include <SDL.h>
+-#include <PsyX/common/glad.h>
++#include "gl_compat.h"
+ #include <PsyX/PsyX_backend.h>
+ 
+ #include "stb_truetype.h"
 diff --git a/pc_port/src/pc_console_cmd.c b/pc_port/src/pc_console_cmd.c
 index ccbe00281..6e6c4be11 100644
 --- a/pc_port/src/pc_console_cmd.c
@@ -148,6 +263,71 @@ index ccbe00281..6e6c4be11 100644
      } else if (strcmp(cmd, "PGXPWORLDDEPTH") == 0) {
          /* Depth-channel kill-switch: OFF suppresses FLAT world promotion
           * (GL_ALWAYS painter + viewZ flat depth), dropping depth behavior
+diff --git a/pc_port/src/pc_freecam_hud.c b/pc_port/src/pc_freecam_hud.c
+index 5f5f98eee..faacc1236 100644
+--- a/pc_port/src/pc_freecam_hud.c
++++ b/pc_port/src/pc_freecam_hud.c
+@@ -13,7 +13,7 @@
+ #include <string.h>
+ 
+ #include <SDL.h>
+-#include <PsyX/common/glad.h>
++#include "gl_compat.h"
+ #include <PsyX/PsyX_backend.h>
+ 
+ #include "sh_log.h"
+diff --git a/pc_port/src/pc_quick_options.c b/pc_port/src/pc_quick_options.c
+index adaae6adf..e71341ba5 100644
+--- a/pc_port/src/pc_quick_options.c
++++ b/pc_port/src/pc_quick_options.c
+@@ -23,7 +23,7 @@
+ #include <string.h>
+ 
+ #include <SDL.h>
+-#include <PsyX/common/glad.h>
++#include "gl_compat.h"
+ #include <PsyX/PsyX_backend.h>
+ 
+ #include "stb_truetype.h"
+diff --git a/pc_port/src/pc_ra_browser.c b/pc_port/src/pc_ra_browser.c
+index b5588b9a4..b70a2d8fe 100644
+--- a/pc_port/src/pc_ra_browser.c
++++ b/pc_port/src/pc_ra_browser.c
+@@ -31,7 +31,7 @@
+ #include <time.h>
+ 
+ #include <SDL.h>
+-#include <PsyX/common/glad.h>
++#include "gl_compat.h"
+ #include <PsyX/PsyX_backend.h>
+ 
+ #include "stb_truetype.h"
+diff --git a/pc_port/src/pc_ra_toast.c b/pc_port/src/pc_ra_toast.c
+index 10a212dcd..f6ce9e1e1 100644
+--- a/pc_port/src/pc_ra_toast.c
++++ b/pc_port/src/pc_ra_toast.c
+@@ -23,7 +23,7 @@
+ #include <math.h>
+ 
+ #include <SDL.h>
+-#include <PsyX/common/glad.h>
++#include "gl_compat.h"
+ #include <PsyX/PsyX_backend.h>
+ #include <AL/al.h>
+ #include <AL/alc.h>
+diff --git a/pc_port/src/pc_rando_settings.c b/pc_port/src/pc_rando_settings.c
+index f39bdcf56..f731eaa4e 100644
+--- a/pc_port/src/pc_rando_settings.c
++++ b/pc_port/src/pc_rando_settings.c
+@@ -25,7 +25,7 @@
+ #include <string.h>
+ 
+ #include <SDL.h>
+-#include <PsyX/common/glad.h>
++#include "gl_compat.h"
+ #include <PsyX/PsyX_backend.h>
+ 
+ #include "stb_truetype.h"
 diff --git a/pc_port/src/stubs/func_stubs.c b/pc_port/src/stubs/func_stubs.c
 index 53d8ef087..b7e99d147 100644
 --- a/pc_port/src/stubs/func_stubs.c
@@ -169,6 +349,37 @@ index 53d8ef087..b7e99d147 100644
  
  void CdMix() { }
  void CdRead2() { }
+diff --git a/pc_port/src/stubs/libgs_stub.c b/pc_port/src/stubs/libgs_stub.c
+index 82422ec89..4ef975162 100644
+--- a/pc_port/src/stubs/libgs_stub.c
++++ b/pc_port/src/stubs/libgs_stub.c
+@@ -15,7 +15,7 @@
+ #include <stdlib.h>
+ #include <stdio.h>
+ #include <SDL.h>
+-#include <PsyX/common/glad.h>
++#include "gl_compat.h"
+ #include <PsyX/PsyX_backend.h>
+ #include <PsyX/PsyX_render.h> /* GR_SetPsxDisplayBuffers */
+ #include "sh_log.h"
+@@ -290,11 +290,16 @@ void GsDrawOt(GsOT *ot)
+         g_currentOTBucketCount = 1 << ot->length;
+         PsyX_ClearGteDepthTable();
+ 
+-        /* The double-precision form is desktop-only; ES 3.0 has glClearDepthf. */
++        /* The double-precision form is desktop-only; ES 3.0 has glClearDepthf,
++         * and no ES build even declares glClearDepth. */
++#if defined(__ANDROID__)
++        glClearDepthf(1.0f);
++#else
+         if (g_grCaps.clearDepthDouble)
+             glClearDepth(1.0f);
+         else
+             glClearDepthf(1.0f);
++#endif
+         glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+ #endif
+         DrawOTag((u_long*)ot->tag);
 diff --git a/src/bodyprog/3d_audio.c b/src/bodyprog/3d_audio.c
 index 9d90579a5..5f23d384c 100644
 --- a/src/bodyprog/3d_audio.c

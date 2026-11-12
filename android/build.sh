@@ -44,6 +44,7 @@ case "$(uname -s)" in
 esac
 LLVM_NM="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/llvm-nm"
 LLVM_OBJCOPY="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/llvm-objcopy"
+LLVM_STRIP="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/llvm-strip"
 
 # Needed by SH_STATIC_MAPS (pc_port/tools/prefix_map_syms.py) and by
 # gen_build_info.cmake; host tools must not be looked up in the target sysroot.
@@ -64,6 +65,7 @@ check_host() {
     [ -f "$TOOLCHAIN" ] || die "NDK $ANDROID_NDK_VERSION not found at $NDK (install it with sdkmanager)"
     [ -x "$LLVM_NM" ] || die "missing $LLVM_NM (SH_STATIC_MAPS needs llvm-nm)"
     [ -x "$LLVM_OBJCOPY" ] || die "missing $LLVM_OBJCOPY (SH_STATIC_MAPS needs llvm-objcopy)"
+    [ -x "$LLVM_STRIP" ] || die "missing $LLVM_STRIP"
     [ -d "$ANDROID_SDK_ROOT/platforms/android-$ANDROID_COMPILE_SDK" ] || \
         die "missing Android platform $ANDROID_COMPILE_SDK in $ANDROID_SDK_ROOT"
     echo "SDK:      $ANDROID_SDK_ROOT"
@@ -218,6 +220,19 @@ build_game() {
 
 stage_apk_inputs() {
     log "staging Gradle inputs for $ABI"
+    # AGP strips .so files it builds itself; it does not touch prebuilt jniLibs,
+    # and these are assembled by hand. Unstripped they were 33 MB (libmain) and
+    # 36 MB (libopenal) of debug sections, which is most of a 39 MB APK. Local
+    # symbols are not needed at runtime: the static map overlays are resolved by
+    # the linker, and SDLActivity looks SDL_main up in .dynsym, which
+    # --strip-unneeded keeps. Set SH_KEEP_SYMBOLS=1 to keep them for debugging.
+    if [ "${SH_KEEP_SYMBOLS:-0}" != "1" ]; then
+        log "stripping debug symbols for $ABI"
+        for so in "$BUILD/libmain.so" "$DEPS/lib/libSDL2.so" "$DEPS/lib/libopenal.so"; do
+            [ -f "$so" ] || die "missing $so"
+            "$LLVM_STRIP" --strip-unneeded "$so"
+        done
+    fi
     python3 "$HERE/tools/stage.py" \
         --root "$ROOT" --work "$WORK" --abi "$ABI" \
         --deps "$DEPS" --build "$BUILD" --ndk "$NDK"
@@ -227,6 +242,12 @@ assemble_apk() {
     log "assembling debug APK"
     GRADLE=${GRADLE_BIN:-gradle}
     need "$GRADLE"
+    # Gradle's package task overwrites app-debug.apk in place, and when the new
+    # APK is smaller than the previous one the tail of the old file survives.
+    # Stripping makes that the normal case (26 MB -> 5.8 MB), and the leftover
+    # bytes are unreachable but real: one rebuild produced a 26 MB APK holding
+    # 14 MB of entries. Remove the target so each package starts from nothing.
+    rm -f "$HERE/app/build/outputs/apk/debug/app-debug.apk"
     (cd "$HERE" && "$GRADLE" --no-daemon :app:assembleDebug)
     apk="$HERE/app/build/outputs/apk/debug/app-debug.apk"
     [ -f "$apk" ] || die "Gradle did not produce $apk"

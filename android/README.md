@@ -6,7 +6,8 @@
 > 然后 `docker run --rm -v "$PWD":/work -w /work/silent-hill sh-android-builder sh android/build.sh all`。
 > 产物在 `dist/SilentHill-Android-debug.apk`。**APK 不含任何游戏数据**，需要你自己准备 Silent Hill 光盘镜像。
 >
-> 该链路已在 Docker 中从零跑通并产出 APK（详见 [Verified build](#verified-build)）；尚未在真机/模拟器上运行过。
+> 该链路已在 Docker 中从零跑通并产出 APK，并已在 **AYN Thor（Android 13 / 骁龙 8 Gen 3 / Adreno 740）** 上安装、启动成功
+> （详见 [Verified build](#verified-build) 与 [Running on a device](#running-on-a-device)）。运行时只差你自己放一张光盘镜像。
 
 ---
 
@@ -24,7 +25,7 @@ upstream commit* (`patches/manifest.json`), targeting a single screen:
 ```
 upstream silent-hill-decomp @ 60ed020… (pc-port)
   + PsyCross submodule @ 20a2fb4…
-  + patches/silent-hill-android.patch   (10 files, shared-lib target + GLES + portability fixes)
+  + patches/silent-hill-android.patch   (22 files, shared-lib target + GLES + portability fixes)
   + patches/psycross-android.patch      (4 files, GLES/Android fixes inside the submodule)
   + native/sh_android.{c,h}             (startup shim)
         |
@@ -96,17 +97,61 @@ clean source tree — patches applied, dependencies compiled, APK assembled:
 
 | Artifact | Result |
 | --- | --- |
-| `libmain.so` | 33 MB, AArch64 `DYN`, `SONAME=libmain.so` |
+| `libmain.so` | 8.4 MB stripped (33 MB before), AArch64 `DYN`, `SONAME=libmain.so` |
 | `NEEDED` | `libSDL2.so`, `libopenal.so`, `libc++_shared.so`, `libGLESv3.so`, `libEGL.so`, `liblog.so`, `libm/libdl/libc` |
-| Exported entry | `SDL_main` (`T`, found by `SDLActivity`'s `dlsym`) |
+| Exported entry | `SDL_main` (`T`, `--strip-unneeded` keeps it in `.dynsym` for `SDLActivity`'s `dlsym`) |
 | Static map overlays | 43 map targets linked into `libmain.so` |
-| `dist/SilentHill-Android-debug.apk` | 26 MB, `arm64-v8a`, minSdk 24, targetSdk 34 |
+| `dist/SilentHill-Android-debug.apk` | 5.8 MB, `arm64-v8a`, minSdk 24, targetSdk 34 |
 | APK payload | `lib/arm64-v8a/{libmain,libSDL2,libopenal,libc++_shared}.so`, fonts, `gamecontrollerdb.txt`, `config.cfg`, licence texts — **no game data** |
 
 Both patches were also verified with `git apply --cached --check` against the
-pristine pinned commits. What has **not** happened is a launch on a device or
-emulator, so expect runtime (driver, audio backend, touch/gamepad) issues
-rather than build issues.
+pristine pinned commits.
+
+### On device
+
+Installed and launched with `adb install -r -g` on an **AYN Thor** (Android 13 /
+SDK 33, `kalama`, Adreno 740, 1920×1080, dual screen — only the primary display
+is used):
+
+* `SDLActivity` → `libmain.so` → `SDL_main` runs; the window is 1920×1080.
+* PsyX reports `OpenGL ES 3.2 … Adreno (TM) 740`, GLSL ES 3.20, and its GL
+  capability probe comes back with `polygonMode=0 getTexImage=0 mapBuffer=0
+  drawBuffer=0 clearDepthD=0 texLevelParam=0` — i.e. the GLES branches are the
+  ones that actually execute.
+* The GLES shader paths compile and link on hardware; the lighting, shadow and
+  flashlight programs all resolve their uniform locations.
+* `gamecontrollerdb.txt`: 253 mappings. The built-in pad enumerates as
+  `Odin Controller` (vid 2020 pid 0111) in slot 0 with the correct mapping.
+* Software SPU starts at 44100 Hz; the app installs its assets on first run and
+  relaunches cleanly after `am force-stop`.
+* With no disc image present the engine shows its own modal naming the exact
+  path it wants — that is the expected stopping point, not a failure.
+
+## Running on a device
+
+```sh
+adb install -r -g dist/SilentHill-Android-debug.apk
+adb shell am start -n com.silenthill.android/.SilentHillActivity
+```
+
+Game data goes to the app's external files directory, which first launch
+creates for you:
+
+```
+/sdcard/Android/data/com.silenthill.android/files/gamedata/<your disc>.bin
+```
+
+Any `.bin` works — the region is probed from the ISO boot serial, not the
+filename — and a `.cue` is not read. Push it with:
+
+```sh
+adb push "Silent Hill (USA).bin" \
+  /sdcard/Android/data/com.silenthill.android/files/gamedata/
+```
+
+The log the port writes next to it (`files/SilentHill_*.log`) is the first place
+to look if something behaves oddly; it echoes every detected capability, the
+resolved paths, and the disc it selected.
 
 ## Build details / design decisions
 
@@ -129,6 +174,22 @@ rather than build issues.
   explicit `-soname` because CMake disables versioned SONAMEs on Android.
   Cross-compile `find_package()` calls are satisfied by `cmake/FindSDL2.cmake`
   and `cmake/FindOpenAL.cmake`, so a host pkg-config can never leak in.
+* **One header owns the GL entry points** (`pc_port/include/gl_compat.h`).
+  Desktop builds resolve GL through PsyX's bundled glad loader, which fills its
+  function-pointer table at runtime. The GLES build never runs that loader, so
+  any translation unit that includes `glad.h` links against a table of NULL
+  pointers and every GL call jumps to address 0 — the first launch died exactly
+  there, in `HiresOverride_ClampBudgetToVram`, SIGSEGV at `pc=0`. The compat
+  header hands GLES the real `GLES3/gl3.h` instead, and supplies the two ES 3.1
+  pnames an ES 3.0 header lacks.
+* **The `.so` files are stripped, and the APK is deleted before packaging.**
+  AGP strips libraries it builds itself, not prebuilt `jniLibs`: unstripped,
+  `libopenal.so` was 36 MB of debug sections and `libmain.so` 33 MB, which is
+  most of a 39 MB APK. Worse, Gradle overwrites `app-debug.apk` in place, so
+  once stripping made the APK smaller the tail of the previous one survived —
+  a 26 MB file holding 14 MB of entries. `build.sh` strips with
+  `llvm-strip --strip-unneeded` (set `SH_KEEP_SYMBOLS=1` to keep them) and
+  removes the target APK first; the result is 5.8 MB.
 * **Working directory.** Android starts native code in `/`. `sh_android.c`
   chdirs into `getExternalFilesDir(null)` and creates `gamedata/`,
   `gamedata/save/`, `logs/` and `licenses/` before anything opens a file. The
@@ -172,13 +233,19 @@ Audio uses OpenAL Soft's OpenSL ES backend; SDL's own audio driver is set to
 
 ## Known limitations
 
-* This is **build-system support**, not a validated device port. The pipeline
-  was executed end to end in Docker and produced a working APK (see
-  [Verified build](#verified-build)), and both patches were checked against the
-  pristine pinned commits, but nothing has been launched on a device or
-  emulator yet. Expect runtime rather than build problems — GLES driver
-  quirks, the OpenSL ES audio path, touch/controller mapping — and please
-  report them.
+* **Tested on exactly one device** (AYN Thor, Android 13, Adreno 740). It boots,
+  initialises the renderer, enumerates the pad and reaches the point where it
+  asks for a disc image — but no gameplay has been exercised, because the game
+  data is not something this repository can ship or obtain. Other GPUs, other
+  Android versions and the audio path under load are unproven; report what
+  breaks.
+* `useLegacyPackaging` is on, so the `.so` files are extracted from the APK at
+  install time. That is what `SDLActivity`'s `dlsym` needs, but it costs the
+  install size rather than the download size.
+* Debug builds are signed with a debug keystore, which is **regenerated
+  whenever `GRADLE_USER_HOME` changes** — an `install -r` over a build made with
+  a different Gradle home fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE` and
+  needs an `adb uninstall` first.
 * Single screen only: the live bottom-screen inventory/map from the RG DS Plus
   port is not part of this build.
 * 64-bit ARM only; `SH_STATIC_MAPS` raises the resident set considerably and
